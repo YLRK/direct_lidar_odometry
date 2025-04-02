@@ -28,13 +28,17 @@ dlo::OdomNode::OdomNode(ros::NodeHandle node_handle) : nh(node_handle) {
   this->dlo_initialized = false;
   this->imu_calibrated = false;
 
+  // 订阅点云数据
   this->icp_sub = this->nh.subscribe("pointcloud", 1, &dlo::OdomNode::icpCB, this);
+  // 订阅IMU数据
   this->imu_sub = this->nh.subscribe("imu", 1, &dlo::OdomNode::imuCB, this);
 
   this->odom_pub = this->nh.advertise<nav_msgs::Odometry>("odom", 1);
   this->pose_pub = this->nh.advertise<geometry_msgs::PoseStamped>("pose", 1);
   this->kf_pub = this->nh.advertise<nav_msgs::Odometry>("kfs", 1, true);
   this->keyframe_pub = this->nh.advertise<sensor_msgs::PointCloud2>("keyframe", 1, true);
+  this->raw_keyframe_pub = this->nh.advertise<sensor_msgs::PointCloud2>("raw_keyframe", 1, true);
+  this->live_pointcloud_pub = this->nh.advertise<sensor_msgs::PointCloud2>("live_pointcloud", 1, true);
   this->save_traj_srv = this->nh.advertiseService("save_traj", &dlo::OdomNode::saveTrajectory, this);
 
   this->odom.pose.pose.position.x = 0.;
@@ -81,6 +85,7 @@ dlo::OdomNode::OdomNode(ros::NodeHandle node_handle) : nh(node_handle) {
   this->original_scan = pcl::PointCloud<PointType>::Ptr (new pcl::PointCloud<PointType>);
   this->current_scan = pcl::PointCloud<PointType>::Ptr (new pcl::PointCloud<PointType>);
   this->current_scan_t = pcl::PointCloud<PointType>::Ptr (new pcl::PointCloud<PointType>);
+  this->original_keyframe_cloud = pcl::PointCloud<PointType>::Ptr (new pcl::PointCloud<PointType>);
 
   this->keyframe_cloud = pcl::PointCloud<PointType>::Ptr (new pcl::PointCloud<PointType>);
   this->keyframes_cloud = pcl::PointCloud<PointType>::Ptr (new pcl::PointCloud<PointType>);
@@ -437,6 +442,16 @@ void dlo::OdomNode::publishKeyframe() {
     keyframe_cloud_ros.header.frame_id = this->odom_frame;
     this->keyframe_pub.publish(keyframe_cloud_ros);
   }
+  
+  // Publish raw keyframe scan
+  if (this->original_keyframe_cloud->points.size() == this->original_keyframe_cloud->width * this->original_keyframe_cloud->height) {
+    sensor_msgs::PointCloud2 raw_keyframe_cloud_ros;
+    pcl::toROSMsg(*this->original_keyframe_cloud, raw_keyframe_cloud_ros);
+    raw_keyframe_cloud_ros.header.stamp = this->scan_stamp;
+    raw_keyframe_cloud_ros.header.frame_id = this->odom_frame;
+    this->raw_keyframe_pub.publish(raw_keyframe_cloud_ros);
+    
+  }
 
 }
 
@@ -684,6 +699,7 @@ void dlo::OdomNode::icpCB(const sensor_msgs::PointCloud2ConstPtr& pc) {
 
   // Update trajectory
   this->trajectory.push_back( std::make_pair(this->pose, this->rotq) );
+  this->trajectory_timestamps.push_back(this->scan_stamp);
 
   // Update next time stamp
   this->prev_frame_stamp = this->curr_frame_stamp;
@@ -698,6 +714,25 @@ void dlo::OdomNode::icpCB(const sensor_msgs::PointCloud2ConstPtr& pc) {
   // Debug statements and publish custom DLO message
   this->debug_thread = std::thread( &dlo::OdomNode::debug, this );
   this->debug_thread.detach();
+
+  // 转换点云格式
+  pcl::PointCloud<PointType>::Ptr current_scan_pcl(new pcl::PointCloud<PointType>);
+  pcl::fromROSMsg(*pc, *current_scan_pcl);
+
+  // 处理点云数据
+  this->current_scan = current_scan_pcl;
+
+  // 发布实时点云数据
+  sensor_msgs::PointCloud2 live_cloud_ros;
+  
+  // 变换点云到当前位姿
+  pcl::PointCloud<PointType>::Ptr transformed_cloud(new pcl::PointCloud<PointType>);
+  pcl::transformPointCloud(*this->current_scan, *transformed_cloud, this->T); // 使用当前的变换矩阵
+
+  pcl::toROSMsg(*transformed_cloud, live_cloud_ros);
+  live_cloud_ros.header.stamp = ros::Time::now();
+  live_cloud_ros.header.frame_id = this->odom_frame;
+  this->live_pointcloud_pub.publish(live_cloud_ros);
 
 }
 
@@ -1161,6 +1196,14 @@ void dlo::OdomNode::updateKeyframes() {
 
     ++this->num_keyframes;
 
+    // 保存原始点云数据并进行变换
+    pcl::PointCloud<PointType>::Ptr original_scan_t (new pcl::PointCloud<PointType>);
+    pcl::transformPointCloud(*this->original_scan, *original_scan_t, this->T);
+    this->original_keyframe_cloud = original_scan_t;
+
+    // 添加调试信息
+    ROS_INFO("Original keyframe cloud size: %zu", this->original_keyframe_cloud->points.size());
+
     // voxelization for submap
     if (this->vf_submap_use_) {
       this->vf_submap.setInputCloud(this->current_scan_t);
@@ -1341,21 +1384,46 @@ void dlo::OdomNode::getSubmapKeyframes() {
 bool dlo::OdomNode::saveTrajectory(direct_lidar_odometry::save_traj::Request& req,
                                    direct_lidar_odometry::save_traj::Response& res) {
   std::string kittipath = req.save_path + "/kitti_traj.txt";
+  std::string tum_path = req.save_path + "/tum_traj.txt";
+  std::string timestamp_path = req.save_path + "/timestamps.txt";
+
   std::ofstream out_kitti(kittipath);
+  std::ofstream out_tum(tum_path);
+  std::ofstream out_timestamp(timestamp_path);
 
   std::cout << std::setprecision(2) << "Saving KITTI trajectory to " << kittipath << "... "; std::cout.flush();
+  std::cout << std::setprecision(2) << "Saving TUM trajectory to " << tum_path << "... "; std::cout.flush();
+  std::cout << std::setprecision(2) << "Saving timestamps to " << timestamp_path << "... "; std::cout.flush();
 
-  for (const auto& pose : this->trajectory) {
+  // 检查轨迹和时间戳数组长度是否匹配
+  if (this->trajectory.size() != this->trajectory_timestamps.size()) {
+    ROS_WARN("Trajectory and timestamps size mismatch! Using current time for missing timestamps.");
+  }
+  
+  for (size_t i = 0; i < this->trajectory.size(); ++i) {
+    const auto& pose = this->trajectory[i];
     const auto& t = pose.first;
     const auto& q = pose.second;
+    
+    // 使用有效的时间戳或当前时间
+    ros::Time timestamp = (i < this->trajectory_timestamps.size()) ? 
+                          this->trajectory_timestamps[i] : ros::Time::now();
+
     // Write to Kitti Format
     auto R = q.normalized().toRotationMatrix();
     out_kitti << std::fixed << std::setprecision(9) 
       << R(0, 0) << " " << R(0, 1) << " " << R(0, 2) << " " << t.x() << " " 
       << R(1, 0) << " " << R(1, 1) << " " << R(1, 2) << " " << t.y() << " " 
       << R(2, 0) << " " << R(2, 1) << " " << R(2, 2) << " " << t.z() << "\n";
-  }
 
+    // Write to TUM Format
+    out_tum << std::fixed << std::setprecision(9)
+      << timestamp.toSec() << " " << t.x() << " " << t.y() << " " << t.z() << " "
+      << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+
+    // Write to Timestamps
+    out_timestamp << std::fixed << std::setprecision(9) << timestamp.toSec() << "\n";
+  }
   std::cout << "done" << std::endl;
   res.success = true;
   return res.success;

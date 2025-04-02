@@ -79,9 +79,12 @@ private:
   ros::Publisher pose_pub;
   ros::Publisher keyframe_pub;
   ros::Publisher kf_pub;
+  ros::Publisher raw_keyframe_pub;
+  ros::Publisher live_pointcloud_pub;
 
   Eigen::Vector3f origin;
   std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> trajectory;
+  std::vector<ros::Time> trajectory_timestamps;
   std::vector<std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>, pcl::PointCloud<PointType>::Ptr>> keyframes;
   std::vector<std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>>> keyframe_normals;
 
@@ -97,6 +100,7 @@ private:
 
   pcl::PointCloud<PointType>::Ptr keyframes_cloud;
   pcl::PointCloud<PointType>::Ptr keyframe_cloud;
+  pcl::PointCloud<PointType>::Ptr original_keyframe_cloud;
   int num_keyframes;
 
   pcl::ConvexHull<PointType> convex_hull;

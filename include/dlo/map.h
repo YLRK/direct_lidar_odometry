@@ -40,11 +40,15 @@ private:
   ros::Timer publish_timer;
 
   ros::Subscriber keyframe_sub;
+  ros::Subscriber raw_keyframe_sub;
   ros::Publisher map_pub;
+  ros::Publisher raw_map_pub;
 
   ros::ServiceServer save_pcd_srv;
+  ros::ServiceServer save_raw_pcd_srv;
 
   pcl::PointCloud<PointType>::Ptr dlo_map;
+  pcl::PointCloud<PointType>::Ptr dlo_map_raw;
   pcl::VoxelGrid<PointType> voxelgrid;
 
   ros::Time map_stamp;
@@ -53,7 +57,12 @@ private:
   bool publish_full_map_;
   double publish_freq_;
   double leaf_size_;
+  double raw_leaf_size_;
 
   static std::atomic<bool> abort_;
+
+  void rawKeyframeCB(const sensor_msgs::PointCloud2ConstPtr& raw_keyframe);
+  bool saveRawPcd(direct_lidar_odometry::save_pcd::Request& req,
+                 direct_lidar_odometry::save_pcd::Response& res);
 
 };
